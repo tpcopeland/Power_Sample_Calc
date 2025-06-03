@@ -929,7 +929,7 @@ with st.expander("About this Calculator", expanded=False):
     3.  Choose what you want to **Calculate** (Sample Size, Power, or MDES).
     4.  Enter the required parameters in the sidebar that appears for the selected test. Use the `(?)` icons next to inputs for detailed explanations.
     5.  View the calculated **Results** and the **Summary of Inputs Used** in the main panel.
-    6.  Use the **"Reset Inputs for This Test"** button in the sidebar to clear parameters for the current module and start fresh.
+    6.  Use the **"Reset Inputs"** button in the sidebar to clear parameters for the current module and start fresh.
 
     #### Disclaimer:
     This tool provides calculations based on established statistical formulas and approximations implemented in Python libraries (`statsmodels`, `scipy`). Approximations for non-parametric tests and Fisher's Exact test power have limitations, especially with very small samples. Results should be critically evaluated in the context of your specific research goals and assumptions. **Consultation with a qualified statistician is strongly recommended for designing critical studies or interpreting results.**

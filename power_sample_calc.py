@@ -106,7 +106,7 @@ def check_expected_counts(test_type: str, n1: float, n_ratio: float, raw_inputs:
     """Check expected counts for proportion tests."""
     if test_type == "two_prop":
         p1, p2 = raw_inputs.get("prop1"), raw_inputs.get("prop2")
-        if n1 and p1 and p2:
+        if n1 is not None and p1 is not None and p2 is not None:
             n2 = math.ceil(n1 * n_ratio)
             counts = [n1 * p1, n1 * (1 - p1), n2 * p2, n2 * (1 - p2)]
             min_count = min(counts)
@@ -115,7 +115,7 @@ def check_expected_counts(test_type: str, n1: float, n_ratio: float, raw_inputs:
                 (st.warning if show_warning else st.sidebar.warning)(msg)
     elif test_type == "one_prop":
         null_p = raw_inputs.get("null_prop")
-        if n1 and null_p:
+        if n1 is not None and null_p is not None:
             counts = [n1 * null_p, n1 * (1 - null_p)]
             min_count = min(counts)
             if min_count < 5:

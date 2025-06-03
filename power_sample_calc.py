@@ -712,7 +712,9 @@ def display_results(config: Dict, inputs: Dict, result: float):
 
     if "effect_size" in inputs:
         summary["Parameter"].append("Effect Size")
-        summary["Value"].append(f"{inputs['effect_size']:.3f}" if inputs['effect_size'] else "N/A")
+        summary["Value"].append(
+            f"{inputs['effect_size']:.3f}" if inputs['effect_size'] is not None else "N/A"
+        )
 
     if "n" in inputs:
         summary["Parameter"].append("Sample Size")

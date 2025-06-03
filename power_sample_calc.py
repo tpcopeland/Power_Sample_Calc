@@ -231,7 +231,7 @@ def calculate_single_proportion_power(alpha: float, alternative: str, power: Opt
         alpha_crit = alpha / 2 if alternative == "two-sided" else alpha
         z_alpha = norm.ppf(1 - alpha_crit)
 
-        if power is None and nobs1:  # Calculate power
+        if power is None and nobs1 is not None:  # Calculate power
             if nobs1 <= 0:
                 st.error("Sample size must be positive.")
                 return None

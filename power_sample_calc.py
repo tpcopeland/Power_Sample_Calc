@@ -844,6 +844,9 @@ def show_test_selection_guide():
         st.session_state["selected_test_category"] = category
         st.session_state["selected_test_name"] = test
         st.session_state["guide_selection_made"] = True
+        # Hide the guide after a selection is made so we jump to the main
+        # calculator with the recommended test already chosen
+        st.session_state["show_guide"] = False
         st.rerun()
 
 

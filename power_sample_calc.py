@@ -841,15 +841,20 @@ def show_test_selection_guide():
 
     st.success(f"**Recommended: {test}**")
 
-    if st.button(f"Use {test}", type="primary"):
-        # Set the session state values using a different key to avoid conflict
+    def _apply_test_selection():
+        """Callback to apply the recommended test and exit the guide."""
         st.session_state["selected_test_category"] = category
         st.session_state["selected_test_name"] = test
         st.session_state["guide_selection_made"] = True
-        # Hide the guide after a selection is made so we jump to the main
-        # calculator with the recommended test already chosen
+        # Hide the guide so the main interface is shown on rerun
         st.session_state["show_guide"] = False
         st.rerun()
+
+    st.button(
+        f"Use {test}",
+        type="primary",
+        on_click=_apply_test_selection,
+    )
 
 
 # Update the main sidebar section as well:

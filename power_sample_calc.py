@@ -893,14 +893,14 @@ def show_main_interface():
     if selected_test:
         run_test_calculation(selected_test)
     else:
-        st.info("👈 Please select a statistical test from the sidebar to begin.")
+        st.info("Please select a statistical test from the sidebar to begin.")
 
 
 # ==============================================================================
 #                             MAIN APP
 # ==============================================================================
 st.set_page_config(page_title="Power Calculator", layout="wide", initial_sidebar_state="expanded")
-st.title("🔬 Power and Sample Size Calculator")
+st.title("Power and Sample Size Calculator")
 
 # About section
 with st.expander("About this Calculator", expanded=False):

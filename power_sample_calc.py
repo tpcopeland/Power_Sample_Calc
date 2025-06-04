@@ -848,7 +848,6 @@ def show_test_selection_guide():
         st.session_state["guide_selection_made"] = True
         # Hide the guide so the main interface is shown on rerun
         st.session_state["show_guide"] = False
-        st.rerun()
 
     st.button(
         f"Use {test}",

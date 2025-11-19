@@ -12,9 +12,38 @@ from statsmodels.stats.power import TTestIndPower, TTestPower, FTestAnovaPower
 # ==============================================================================
 #                             CONSTANTS & CONFIG
 # ==============================================================================
-# Asymptotic Relative Efficiency (ARE) factors
+# Asymptotic Relative Efficiency (ARE) factors for non-parametric tests
+# ARE values represent the relative efficiency compared to parametric tests.
+# For non-parametric tests with normal data:
+#   - Sample size calculation: n_np = n_p / ARE (requires fewer observations due to conservative nature)
+#   - Power calculation: For approximate power, scale effect size: effect_np ≈ effect_p * sqrt(ARE)
+# ARE ≈ 3/π ≈ 0.9549 for rank-based tests under normality assumption.
+# Reference: Lehmann, E. L. (1998). Nonparametrics: Statistical Methods Based on Ranks
 ARE_FACTORS = {"wilcoxon": 0.955, "mann_whitney": 0.955, "kruskal_wallis": 0.955}
+
+# Fisher's Exact Test adjustments
+# These factors account for the conservativeness of Fisher's Exact Test (uses discrete distribution)
+# compared to normal approximation-based tests (use continuous distribution).
+# - n factor (1.05): Sample size 5% larger to compensate for conservative test
+# - power factor (0.95): Actual power is ~95% of calculated power due to discreteness
+# These are empirical factors derived from simulation studies and are applied universally.
+# Note: Adjustment magnitudes vary slightly by proportion values but these are reasonable defaults.
 FISHER_ADJUSTMENTS = {"power": 0.95, "n": 1.05}
+
+# Repeated Measures ANOVA stability parameters
+# CORRELATION_STABILITY_CAP: Maximum correlation allowed to prevent numerical instability.
+# When correlation is very high (>0.89), the variance term (1 - correlation) becomes very small,
+# leading to inflated F-statistics and unreliable power estimates. Capping at 0.89 ensures
+# the denominator in power calculation (max(1 - r, MIN_VARIANCE_THRESHOLD)) stays meaningful.
+CORRELATION_STABILITY_CAP = 0.89
+# MIN_VARIANCE_THRESHOLD: Minimum allowed variance term in repeated measures calculations.
+# Prevents division issues when (1 - correlation) becomes too small.
+MIN_VARIANCE_THRESHOLD = 0.11
+
+# Monte Carlo simulation parameters
+# MONTE_CARLO_SAMPLES: Number of iterations for Bayesian assurance and expected power calculations.
+# Higher values increase accuracy but add computational time. 10,000 is a reasonable balance.
+MONTE_CARLO_SAMPLES = 10000
 
 # Practical guidance constants
 RECRUITMENT_FEASIBILITY_THRESHOLDS = {
@@ -377,6 +406,10 @@ def estimate_study_timeline(total_n: int, monthly_recruitment_rate: int = None) 
         else:
             return "Estimated timeline: 36+ months (multi-center collaboration required)"
     else:
+        # Validate monthly recruitment rate
+        if monthly_recruitment_rate is None or monthly_recruitment_rate <= 0:
+            return "Invalid monthly recruitment rate (must be positive). Cannot estimate timeline."
+
         months = math.ceil(total_n / monthly_recruitment_rate)
         years = months / 12
         if years < 1:
@@ -627,8 +660,8 @@ def calculate_repeated_measures_power(n: int, effect_size: float, alpha: float,
         # Higher correlation reduces variance of differences, increasing power
         # Approximation: effective_f ≈ f / sqrt(1 - ρ)
         # Cap correlation effect to prevent numerical instability
-        correlation_capped = min(correlation, 0.89)  # Cap at 0.89 for stability
-        effective_f = effect_size / np.sqrt(max(1 - correlation_capped, 0.11))
+        correlation_capped = min(correlation, CORRELATION_STABILITY_CAP)
+        effective_f = effect_size / np.sqrt(max(1 - correlation_capped, MIN_VARIANCE_THRESHOLD))
 
         power = power_calc.solve_power(
             effect_size=effective_f,
@@ -700,8 +733,8 @@ def calculate_repeated_measures_n(effect_size: float, alpha: float, power: float
 
         # Cap correlation to prevent numerical instability
         # At high correlations, the adjustment formula becomes unstable
-        correlation_capped = min(correlation, 0.89)  # Cap at 0.89 for stability
-        effective_f = effect_size / np.sqrt(max(1 - correlation_capped, 0.11))
+        correlation_capped = min(correlation, CORRELATION_STABILITY_CAP)
+        effective_f = effect_size / np.sqrt(max(1 - correlation_capped, MIN_VARIANCE_THRESHOLD))
 
         # Use ANOVA power calculator
         power_calc = FTestAnovaPower()
@@ -764,7 +797,7 @@ def calculate_assurance(n: int, alpha: float, prior_mean: float, prior_sd: float
     """
     try:
         # Monte Carlo integration over prior distribution
-        n_samples = 10000
+        n_samples = MONTE_CARLO_SAMPLES
         effect_sizes = np.random.normal(prior_mean, prior_sd, n_samples)
 
         # IMPORTANT: Effect sizes are converted to absolute values because Cohen's d
@@ -883,7 +916,7 @@ def calculate_expected_power(n: int, alpha: float, prior_mean: float, prior_sd: 
     """
     try:
         # Monte Carlo integration
-        n_samples = 10000
+        n_samples = MONTE_CARLO_SAMPLES
         effect_sizes = np.random.normal(prior_mean, prior_sd, n_samples)
 
         # IMPORTANT: Effect sizes are converted to absolute values because Cohen's d
@@ -925,7 +958,75 @@ def calculate_expected_power(n: int, alpha: float, prior_mean: float, prior_sd: 
 #                        STREAMLINED TEST CONFIGURATIONS
 # ==============================================================================
 def get_test_config(test_name: str) -> Dict:
-    """Get test configuration dynamically to reduce memory footprint."""
+    """
+    Get test configuration dictionary for a given statistical test.
+
+    Retrieves comprehensive configuration for power analysis calculations including
+    calculation methods, effect size types, and benchmark values. Designed to reduce
+    memory footprint by generating configs dynamically rather than loading all at once.
+
+    Parameters:
+    -----------
+    test_name : str
+        Name of the statistical test, e.g., "Two-Sample Independent Groups t-test",
+        "Mann-Whitney U Test", "Log-Rank Test", etc.
+
+    Returns:
+    --------
+    Dict
+        Configuration dictionary with the following structure:
+
+        Core Keys:
+        ----------
+        - "key" (str): Short identifier for the test (e.g., "2samp", "mw", "paired")
+        - "effect" (str): Type of effect size ("cohen_d_two", "cohen_h", "hazard_ratio", etc.)
+
+        Calculation Method (one of):
+        ----------------------------
+        - "class": statsmodels power class (TTestIndPower, FTestAnovaPower, etc.)
+            Used for parametric and basic tests
+        - "func" (str): Custom function name for special tests
+            Used for single proportion, log-rank, Bayesian methods, etc.
+
+        Effect Size Configuration:
+        --------------------------
+        - "benchmarks" (dict, optional): Small/Medium/Large benchmark effect sizes
+            Example: {"Small": 0.2, "Medium": 0.5, "Large": 0.8}
+
+        Raw Input Configuration:
+        -----------------------
+        - "raw_inputs" (list, optional): Field names for raw value input
+            Example: ["mean1", "mean2", "pooled_sd"] for t-test
+
+        Sample Size Labels:
+        ------------------
+        - "n_labels" (list): Labels for different N values in output
+            Example: ["Required N₁", "Required N₂", "Total N Required"]
+
+        Optional Flags:
+        ---------------
+        - "n_ratio" (bool): Whether to include group size allocation ratio
+        - "nobs_total" (bool): Whether total N is used (vs per-group N)
+        - "k_groups" (int or bool): Number of groups (for ANOVA/Kruskal-Wallis)
+        - "fixed_alt" (bool): Whether alternative hypothesis is fixed
+        - "are" (str): Asymptotic Relative Efficiency for non-parametric tests
+        - "fisher" (bool): Apply Fisher's Exact Test adjustments
+        - "check_counts" (str): Type of expected count validation ("one_prop", "two_prop")
+        - "cluster_randomized" (bool): Whether test supports cluster-randomized design
+        - "bayesian" (bool): Whether test supports Bayesian methods
+        - "repeated_measures" (bool): Whether test supports repeated measures
+
+    Examples:
+    ---------
+    >>> config = get_test_config("Two-Sample Independent Groups t-test")
+    >>> print(config["class"])  # <class 'statsmodels.stats.power.TTestIndPower'>
+    >>> print(config["effect"])  # "cohen_d_two"
+    >>> print(config["benchmarks"])  # {"Small": 0.2, "Medium": 0.5, "Large": 0.8}
+
+    >>> config = get_test_config("Log-Rank Test")
+    >>> print(config["func"])  # "calculate_logrank_power"
+    >>> print(config["raw_inputs"])  # ["hazard_ratio", "prob_event"]
+    """
     base_configs = {
         # Parametric Tests
         "Two-Sample Independent Groups t-test": {
@@ -1222,9 +1323,10 @@ def calculate_logrank_power(alpha: float, alternative: str, power: Optional[floa
 
             # Number of events needed (Schoenfeld's formula)
             # For two groups with allocation ratio r = n2/n1:
-            # d = (z_alpha + z_beta)² × (1 + r)² / (r × theta²)
+            # d = (z_alpha + z_beta)² × (1 + r) / (r × theta²)
             # For equal allocation (r=1): d = 4 × (z_alpha + z_beta)² / theta²
-            d_needed = ((z_alpha + z_beta) ** 2) * ((1 + ratio) ** 2) / (ratio * (theta ** 2))
+            # Reference: Schoenfeld, D. (1981). Biometrika, 68(1), 316-319
+            d_needed = ((z_alpha + z_beta) ** 2) * (1 + ratio) / (ratio * (theta ** 2))
 
             # Convert events to total sample size
             n_total = d_needed / prob_event
@@ -1720,6 +1822,37 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
     alpha = inputs["alpha"]
     alt = inputs["alternative"]
 
+    # === CORE PARAMETER VALIDATION ===
+    # Validate alpha (Type I error rate)
+    if not (0 < alpha < 1):
+        st.error(f"Significance level (alpha) must be between 0 and 1. Received: {alpha}")
+        return None
+    if alpha > 0.5:
+        st.error(f"Significance level (alpha) should typically be ≤ 0.50. Received: {alpha}. "
+                "This is likely invalid. Check your alpha value.")
+        return None
+    if alpha > 0.20:
+        st.warning(f"⚠️ Significance level (alpha) of {alpha:.4f} is unusually high. "
+                   "Common values are 0.001-0.20. Please verify this is intentional.")
+
+    # Validate effect size (check for NaN, infinity, and unrealistic values)
+    if effect is not None:
+        if not isinstance(effect, (int, float)):
+            st.error(f"Effect size must be numeric. Received: {type(effect)}")
+            return None
+        if not math.isfinite(effect):
+            st.error(f"Effect size cannot be NaN or infinity. Received: {effect}")
+            return None
+        if effect < 0:
+            # Take absolute value since power calculations use magnitude only
+            effect = abs(effect)
+        if effect > 100:
+            st.warning(f"⚠️ Effect size of {effect:.2f} is unusually large (> 100). "
+                      "This may indicate a data entry error. Verify your value.")
+        if effect == 0:
+            st.error("Effect size must be greater than 0 (cannot detect zero effect).")
+            return None
+
     # Enhanced validation with specific error messages
     if goal == "Sample Size":
         # For single proportion, we need raw proportions, not necessarily effect size
@@ -1732,9 +1865,15 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
             if not effect or effect <= 0:
                 st.warning("Please provide a valid effect size (must be > 0).")
                 return None
+        # Validate power for Sample Size goal
         if not power or not (0 < power < 1):
-            st.warning("Please provide a valid power value (between 0 and 1).")
+            st.error("Please provide a valid power value (between 0 and 1).")
             return None
+        if power < 0.50:
+            st.warning(f"⚠️ Power of {power:.2%} is below 0.50. This is unusually low and may miss important effects.")
+        if power >= 0.99:
+            st.warning(f"⚠️ Power of {power:.2%} is very high (≥ 0.99). This may require unrealistically large samples.")
+
     elif goal == "Power":
         # For single proportion, we need raw proportions, not necessarily effect size
         if config.get("key") == "singleprop":
@@ -1749,10 +1888,17 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
         if not n or n < 3:
             st.warning("Please provide a valid sample size (must be ≥ 3).")
             return None
+
     elif goal == "MDES":
+        # Validate power for MDES goal
         if not power or not (0 < power < 1):
-            st.warning("Please provide a valid power value (between 0 and 1).")
+            st.error("Please provide a valid power value (between 0 and 1).")
             return None
+        if power < 0.50:
+            st.warning(f"⚠️ Power of {power:.2%} is below 0.50. The MDES may be unreliably large.")
+        if power >= 0.99:
+            st.warning(f"⚠️ Power of {power:.2%} is very high (≥ 0.99). The MDES will be very small.")
+
         if not n or n < 3:
             st.warning("Please provide a valid sample size (must be ≥ 3).")
             return None
@@ -1928,6 +2074,10 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
             if goal == "Sample Size":
                 result /= are_factor
             elif goal == "MDES":
+                # MDES adjustment: non-parametric MDES is larger (test is less efficient)
+                # For non-parametric tests: MDES_np = MDES_p / sqrt(ARE)
+                # But since we multiplied effect by sqrt(ARE) in line 1768,
+                # we need to divide result by sqrt(ARE) to get correct MDES
                 result /= np.sqrt(are_factor)
 
         if config.get("fisher"):

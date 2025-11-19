@@ -34,6 +34,23 @@ COMMON_PITFALLS = {
     "equal_allocation": "Unequal allocation may be more efficient with different costs or variances.",
 }
 
+# Intra-Cluster Correlation (ICC) typical ranges by field
+ICC_RANGES = {
+    "primary_care": (0.01, 0.05),
+    "schools": (0.05, 0.20),
+    "hospitals": (0.01, 0.10),
+    "communities": (0.001, 0.05),
+    "worksites": (0.01, 0.10),
+}
+
+# Bayesian prior distributions for common effect sizes
+BAYESIAN_PRIORS = {
+    "skeptical": {"mean": 0.1, "sd": 0.15},  # Skeptical prior (small effects)
+    "optimistic": {"mean": 0.5, "sd": 0.25},  # Optimistic prior (medium effects)
+    "neutral": {"mean": 0.3, "sd": 0.30},     # Neutral/Vague prior
+    "enthusiastic": {"mean": 0.8, "sd": 0.30}, # Enthusiastic prior (large effects)
+}
+
 # Centralized citations
 CITATIONS = {
     "cohen_1988": (
@@ -73,6 +90,16 @@ CITATIONS = {
                      "https://en.wikipedia.org/wiki/Logrank_test"),
     "hazard_ratio": ("Hazard Ratio - Statistics How To",
                      "https://www.statisticshowto.com/hazard-ratio/"),
+    "donner_klar": ("Donner, A., & Klar, N. (2000). Design and Analysis of Cluster Randomization Trials in Health Research. Arnold.",
+                    "https://onlinelibrary.wiley.com/doi/book/10.1002/9781118763452"),
+    "icc_info": ("Intraclass Correlation - Design Effect",
+                 "https://sphweb.bumc.bu.edu/otlt/mph-modules/bs/bs704_power/bs704_power_print.html"),
+    "repeated_measures": ("Repeated Measures ANOVA - Statistical Power",
+                          "https://www.statisticshowto.com/repeated-measures-anova/"),
+    "bayesian_sample_size": ("Spiegelhalter, D. J., et al. (2004). Bayesian approaches to randomized trials. JRSS-A, 167(3), 357-416.",
+                             "https://rss.onlinelibrary.wiley.com/doi/10.1111/j.1467-985X.2004.02044.x"),
+    "assurance": ("O'Hagan, A., et al. (2005). Assurance in clinical trial design. Pharmaceutical Statistics, 4(3), 187-201.",
+                  "https://onlinelibrary.wiley.com/doi/abs/10.1002/pst.175"),
 }
 
 
@@ -324,6 +351,369 @@ def _interpret_clinical_significance(effect_size: float, effect_type: str) -> st
 
 
 # ==============================================================================
+#                   CLUSTER-RANDOMIZED TRIAL FUNCTIONS
+# ==============================================================================
+def calculate_design_effect(icc: float, cluster_size: float) -> float:
+    """
+    Calculate design effect for cluster-randomized trials.
+
+    Design Effect (DEFF) = 1 + (m - 1) * ICC
+    where m is the average cluster size and ICC is the intra-cluster correlation.
+
+    Parameters:
+    -----------
+    icc : float
+        Intra-cluster correlation coefficient (0 to 1)
+    cluster_size : float
+        Average number of participants per cluster
+
+    Returns:
+    --------
+    float : Design effect (≥ 1)
+    """
+    if icc < 0 or icc > 1:
+        raise ValueError("ICC must be between 0 and 1")
+    if cluster_size < 1:
+        raise ValueError("Cluster size must be at least 1")
+
+    return 1 + (cluster_size - 1) * icc
+
+
+def calculate_clusters_needed(individual_n: float, cluster_size: float, icc: float) -> tuple:
+    """
+    Calculate number of clusters needed for cluster-randomized trial.
+
+    Parameters:
+    -----------
+    individual_n : float
+        Sample size needed if individuals were randomized
+    cluster_size : float
+        Average number of participants per cluster
+    icc : float
+        Intra-cluster correlation coefficient
+
+    Returns:
+    --------
+    tuple : (total_participants_needed, number_of_clusters, design_effect)
+    """
+    deff = calculate_design_effect(icc, cluster_size)
+    total_n_cluster = individual_n * deff
+    n_clusters = math.ceil(total_n_cluster / cluster_size)
+
+    return (int(math.ceil(total_n_cluster)), n_clusters, deff)
+
+
+def interpret_icc(icc: float) -> str:
+    """Provide interpretation of ICC magnitude."""
+    if icc < 0.01:
+        return "Very low ICC (<0.01): Minimal clustering effect"
+    elif icc < 0.05:
+        return "Low ICC (0.01-0.05): Small clustering effect"
+    elif icc < 0.10:
+        return "Moderate ICC (0.05-0.10): Moderate clustering effect"
+    elif icc < 0.20:
+        return "High ICC (0.10-0.20): Substantial clustering effect"
+    else:
+        return "Very High ICC (>0.20): Large clustering effect - design effect will be substantial"
+
+
+# ==============================================================================
+#                   REPEATED MEASURES ANOVA FUNCTIONS
+# ==============================================================================
+def calculate_repeated_measures_power(n: int, effect_size: float, alpha: float,
+                                     num_measurements: int, correlation: float,
+                                     alternative: str = "two-sided") -> Optional[float]:
+    """
+    Calculate power for repeated measures ANOVA (within-subjects design).
+
+    Uses adjustment for correlation between repeated measures.
+    Adjusted effect size: f_adj = f * sqrt(1 - ρ)
+    Where ρ is the average correlation between measurements.
+
+    Parameters:
+    -----------
+    n : int
+        Number of participants (subjects)
+    effect_size : float
+        Cohen's f for the within-subjects effect
+    alpha : float
+        Significance level
+    num_measurements : int
+        Number of repeated measurements/time points
+    correlation : float
+        Average correlation between repeated measurements (0 to 1)
+    alternative : str
+        'two-sided' or 'one-sided'
+
+    Returns:
+    --------
+    float : Statistical power (0 to 1)
+    """
+    try:
+        if correlation < 0 or correlation > 1:
+            st.error("Correlation must be between 0 and 1")
+            return None
+
+        # Adjust effect size for correlation
+        # Higher correlation = more efficient repeated measures design
+        epsilon = 1.0  # Sphericity assumption (can be adjusted)
+        f_adj = effect_size
+
+        # Calculate degrees of freedom
+        df_effect = (num_measurements - 1) * epsilon
+        df_error = (n - 1) * df_effect
+
+        # Use ANOVA power calculator with adjusted parameters
+        power_calc = FTestAnovaPower()
+
+        # For repeated measures, effective n is larger due to within-subjects design
+        # Reduction factor due to correlation: 1 - ρ
+        effective_f = effect_size / np.sqrt(1 - correlation + 0.0001)  # Avoid division by zero
+
+        power = power_calc.solve_power(
+            effect_size=effective_f,
+            nobs=n * num_measurements,
+            alpha=alpha,
+            k_groups=num_measurements
+        )
+
+        return max(0.0, min(1.0, power))
+
+    except Exception as e:
+        st.error(f"Error in repeated measures power calculation: {e}")
+        return None
+
+
+def calculate_repeated_measures_n(effect_size: float, alpha: float, power: float,
+                                  num_measurements: int, correlation: float) -> Optional[int]:
+    """
+    Calculate required number of subjects for repeated measures ANOVA.
+
+    Parameters:
+    -----------
+    effect_size : float
+        Cohen's f for the within-subjects effect
+    alpha : float
+        Significance level
+    power : float
+        Desired statistical power
+    num_measurements : int
+        Number of repeated measurements/time points
+    correlation : float
+        Average correlation between repeated measurements
+
+    Returns:
+    --------
+    int : Number of subjects needed
+    """
+    try:
+        if correlation < 0 or correlation > 1:
+            st.error("Correlation must be between 0 and 1")
+            return None
+
+        # Adjust effect size for correlation
+        effective_f = effect_size / np.sqrt(1 - correlation + 0.0001)
+
+        # Use ANOVA power calculator
+        power_calc = FTestAnovaPower()
+
+        # Solve for total observations
+        total_obs = power_calc.solve_power(
+            effect_size=effective_f,
+            nobs=None,
+            alpha=alpha,
+            power=power,
+            k_groups=num_measurements
+        )
+
+        # Convert to number of subjects
+        n_subjects = math.ceil(total_obs / num_measurements)
+
+        return max(3, n_subjects)  # Minimum 3 subjects
+
+    except Exception as e:
+        st.error(f"Error in repeated measures sample size calculation: {e}")
+        return None
+
+
+# ==============================================================================
+#                   BAYESIAN SAMPLE SIZE FUNCTIONS
+# ==============================================================================
+def calculate_assurance(n: int, alpha: float, prior_mean: float, prior_sd: float,
+                       target_power: float = 0.80, alternative: str = "two-sided") -> Optional[float]:
+    """
+    Calculate assurance (probability of achieving target power given prior on effect size).
+
+    Assurance is the expected power averaged over the prior distribution of effect sizes.
+    It answers: "What's the probability we'll achieve our target power given our
+    uncertainty about the true effect size?"
+
+    Parameters:
+    -----------
+    n : int
+        Planned sample size per group
+    alpha : float
+        Significance level
+    prior_mean : float
+        Mean of prior distribution on Cohen's d
+    prior_sd : float
+        Standard deviation of prior distribution on Cohen's d
+    target_power : float
+        Target power threshold (default 0.80)
+    alternative : str
+        'two-sided' or 'one-sided'
+
+    Returns:
+    --------
+    float : Assurance (probability of achieving target power)
+    """
+    try:
+        # Monte Carlo integration over prior distribution
+        n_samples = 10000
+        effect_sizes = np.random.normal(prior_mean, prior_sd, n_samples)
+        effect_sizes = np.abs(effect_sizes)  # Use absolute values
+
+        powers = []
+        power_calc = TTestIndPower()
+
+        for es in effect_sizes:
+            if es > 0:
+                try:
+                    pwr = power_calc.solve_power(
+                        effect_size=es,
+                        nobs1=n,
+                        alpha=alpha,
+                        ratio=1.0,
+                        alternative=alternative
+                    )
+                    powers.append(pwr if math.isfinite(pwr) else 0)
+                except:
+                    powers.append(0)
+            else:
+                powers.append(0)
+
+        # Assurance = P(Power > target_power)
+        assurance = np.mean(np.array(powers) >= target_power)
+
+        return assurance
+
+    except Exception as e:
+        st.error(f"Error calculating assurance: {e}")
+        return None
+
+
+def calculate_bayesian_sample_size(alpha: float, prior_mean: float, prior_sd: float,
+                                   target_assurance: float = 0.80,
+                                   target_power: float = 0.80,
+                                   alternative: str = "two-sided",
+                                   max_n: int = 10000) -> Optional[int]:
+    """
+    Calculate sample size to achieve target assurance.
+
+    Parameters:
+    -----------
+    alpha : float
+        Significance level
+    prior_mean : float
+        Mean of prior distribution on Cohen's d
+    prior_sd : float
+        Standard deviation of prior distribution
+    target_assurance : float
+        Desired assurance level (default 0.80)
+    target_power : float
+        Target power threshold for assurance calculation (default 0.80)
+    alternative : str
+        'two-sided' or 'one-sided'
+    max_n : int
+        Maximum sample size to search (default 10000)
+
+    Returns:
+    --------
+    int : Sample size per group to achieve target assurance
+    """
+    try:
+        # Binary search for required sample size
+        low, high = 10, max_n
+        result_n = None
+
+        while low <= high:
+            mid = (low + high) // 2
+            assurance = calculate_assurance(mid, alpha, prior_mean, prior_sd,
+                                           target_power, alternative)
+
+            if assurance is None:
+                return None
+
+            if assurance >= target_assurance:
+                result_n = mid
+                high = mid - 1  # Try smaller n
+            else:
+                low = mid + 1   # Need larger n
+
+        return result_n if result_n else max_n
+
+    except Exception as e:
+        st.error(f"Error in Bayesian sample size calculation: {e}")
+        return None
+
+
+def calculate_expected_power(n: int, alpha: float, prior_mean: float, prior_sd: float,
+                            alternative: str = "two-sided") -> Optional[float]:
+    """
+    Calculate expected power (average power over prior distribution).
+
+    Parameters:
+    -----------
+    n : int
+        Sample size per group
+    alpha : float
+        Significance level
+    prior_mean : float
+        Mean of prior distribution on Cohen's d
+    prior_sd : float
+        Standard deviation of prior distribution
+    alternative : str
+        'two-sided' or 'one-sided'
+
+    Returns:
+    --------
+    float : Expected power (average over prior)
+    """
+    try:
+        # Monte Carlo integration
+        n_samples = 10000
+        effect_sizes = np.random.normal(prior_mean, prior_sd, n_samples)
+        effect_sizes = np.abs(effect_sizes)
+
+        powers = []
+        power_calc = TTestIndPower()
+
+        for es in effect_sizes:
+            if es > 0:
+                try:
+                    pwr = power_calc.solve_power(
+                        effect_size=es,
+                        nobs1=n,
+                        alpha=alpha,
+                        ratio=1.0,
+                        alternative=alternative
+                    )
+                    powers.append(pwr if math.isfinite(pwr) else 0)
+                except:
+                    powers.append(0)
+            else:
+                powers.append(0)
+
+        expected_power = np.mean(powers)
+
+        return expected_power
+
+    except Exception as e:
+        st.error(f"Error calculating expected power: {e}")
+        return None
+
+
+# ==============================================================================
 #                        STREAMLINED TEST CONFIGURATIONS
 # ==============================================================================
 def get_test_config(test_name: str) -> Dict:
@@ -391,6 +781,34 @@ def get_test_config(test_name: str) -> Dict:
             "raw_inputs": ["hazard_ratio", "prob_event"], "n_ratio": True,
             "n_labels": ["Required N₁", "Required N₂", "Total N Required"],
             "benchmarks": {"Small (HR=0.8)": 0.8, "Medium (HR=0.65)": 0.65, "Large (HR=0.5)": 0.5}
+        },
+        # Cluster-Randomized Trials
+        "Cluster-Randomized t-test": {
+            "key": "crt_ttest", "class": TTestIndPower, "effect": "cohen_d_two",
+            "benchmarks": {"Small": 0.2, "Medium": 0.5, "Large": 0.8},
+            "raw_inputs": ["mean1", "mean2", "pooled_sd"], "n_ratio": True,
+            "cluster_randomized": True,
+            "n_labels": ["Required N₁", "Required N₂", "Total N Required"]
+        },
+        "Cluster-Randomized Proportion Test": {
+            "key": "crt_prop", "func": "power_proportions_2indep", "effect": "cohen_h",
+            "raw_inputs": ["prop1", "prop2"], "n_ratio": True,
+            "cluster_randomized": True, "check_counts": "two_prop",
+            "n_labels": ["Required N₁", "Required N₂", "Total N Required"]
+        },
+        # Repeated Measures
+        "Repeated Measures ANOVA": {
+            "key": "rm_anova", "func": "calculate_repeated_measures_power", "effect": "cohen_f",
+            "benchmarks": {"Small": 0.10, "Medium": 0.25, "Large": 0.40},
+            "repeated_measures": True, "nobs_total": True,
+            "n_labels": ["Required N (Subjects)", "Total Observations"]
+        },
+        # Bayesian Methods
+        "Bayesian Sample Size (Assurance)": {
+            "key": "bayesian_assurance", "func": "calculate_bayesian_sample_size",
+            "effect": "cohen_d_two", "bayesian": True,
+            "benchmarks": {"Small": 0.2, "Medium": 0.5, "Large": 0.8},
+            "n_labels": ["Required N₁ (Assurance)", "Required N₂", "Total N Required"]
         }
     }
 
@@ -698,6 +1116,111 @@ def collect_inputs(config: Dict, key: str) -> Dict:
     if inputs["goal"] == "Sample Size":
         inputs["dropout"] = st.sidebar.slider("Dropout Rate (%)", 0, 50, 0, 1, key=f"dropout_{key}")
 
+    # Cluster-randomized parameters
+    if config.get("cluster_randomized"):
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**📊 Cluster-Randomized Design Parameters**")
+
+        inputs["cluster_size"] = st.sidebar.number_input(
+            "Average Cluster Size (m)",
+            min_value=2,
+            value=20,
+            key=f"cluster_size_{key}",
+            help="Average number of participants per cluster (e.g., patients per clinic, students per school)"
+        )
+
+        # ICC input with guidance
+        icc_default = 0.05
+        inputs["icc"] = st.sidebar.slider(
+            "Intra-Cluster Correlation (ICC)",
+            min_value=0.001,
+            max_value=0.50,
+            value=icc_default,
+            step=0.001,
+            format="%.3f",
+            key=f"icc_{key}",
+            help="Correlation between observations within the same cluster. Typical ranges: Primary care 0.01-0.05, Schools 0.05-0.20"
+        )
+
+        st.sidebar.info(interpret_icc(inputs["icc"]))
+
+    # Repeated measures parameters
+    if config.get("repeated_measures"):
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**🔁 Repeated Measures Parameters**")
+
+        inputs["num_measurements"] = st.sidebar.number_input(
+            "Number of Measurements",
+            min_value=2,
+            value=3,
+            key=f"num_meas_{key}",
+            help="Number of repeated measurements/time points per subject"
+        )
+
+        inputs["correlation"] = st.sidebar.slider(
+            "Avg. Correlation Between Measures",
+            min_value=0.0,
+            max_value=0.95,
+            value=0.5,
+            step=0.05,
+            key=f"corr_{key}",
+            help="Average correlation between repeated measurements. Higher correlation = more efficient design."
+        )
+
+    # Bayesian parameters
+    if config.get("bayesian"):
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**🎲 Bayesian Prior on Effect Size**")
+
+        prior_choice = st.sidebar.selectbox(
+            "Prior Distribution",
+            ["Skeptical", "Neutral", "Optimistic", "Enthusiastic", "Custom"],
+            key=f"prior_{key}",
+            help="Prior belief about effect size distribution"
+        )
+
+        if prior_choice == "Custom":
+            inputs["prior_mean"] = st.sidebar.number_input(
+                "Prior Mean (Cohen's d)",
+                min_value=0.0,
+                value=0.3,
+                step=0.05,
+                key=f"prior_mean_{key}"
+            )
+            inputs["prior_sd"] = st.sidebar.number_input(
+                "Prior SD",
+                min_value=0.05,
+                value=0.25,
+                step=0.05,
+                key=f"prior_sd_{key}"
+            )
+        else:
+            prior_params = BAYESIAN_PRIORS[prior_choice.lower()]
+            inputs["prior_mean"] = prior_params["mean"]
+            inputs["prior_sd"] = prior_params["sd"]
+
+        st.sidebar.info(f"Prior: N({inputs['prior_mean']:.2f}, {inputs['prior_sd']:.2f})")
+
+        if inputs["goal"] == "Sample Size":
+            inputs["target_assurance"] = st.sidebar.slider(
+                "Target Assurance",
+                min_value=0.50,
+                max_value=0.95,
+                value=0.80,
+                step=0.05,
+                key=f"assurance_{key}",
+                help="Probability of achieving target power given prior uncertainty"
+            )
+            inputs["target_power"] = st.sidebar.slider(
+                "Target Power Threshold",
+                min_value=0.50,
+                max_value=0.95,
+                value=0.80,
+                step=0.05,
+                key=f"target_power_{key}",
+                help="Power threshold for assurance calculation"
+            )
+
     return inputs
 
 
@@ -975,7 +1498,88 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
         elif config.get("func"):  # Direct function
             func_name = config["func"]
 
-            if func_name == "calculate_single_proportion_power":
+            # Repeated Measures ANOVA
+            if func_name == "calculate_repeated_measures_power":
+                num_measurements = inputs.get("num_measurements", 3)
+                correlation = inputs.get("correlation", 0.5)
+
+                if goal == "Sample Size":
+                    result = calculate_repeated_measures_n(
+                        effect_size=effect,
+                        alpha=alpha,
+                        power=power,
+                        num_measurements=num_measurements,
+                        correlation=correlation
+                    )
+                elif goal == "Power":
+                    result = calculate_repeated_measures_power(
+                        n=n,
+                        effect_size=effect,
+                        alpha=alpha,
+                        num_measurements=num_measurements,
+                        correlation=correlation,
+                        alternative=alt
+                    )
+                else:  # MDES - not directly supported, return None
+                    st.warning("MDES calculation not yet supported for Repeated Measures ANOVA.")
+                    return None
+
+            # Bayesian Sample Size
+            elif func_name == "calculate_bayesian_sample_size":
+                prior_mean = inputs.get("prior_mean", 0.3)
+                prior_sd = inputs.get("prior_sd", 0.25)
+                target_assurance = inputs.get("target_assurance", 0.80)
+                target_power = inputs.get("target_power", 0.80)
+
+                if goal == "Sample Size":
+                    result = calculate_bayesian_sample_size(
+                        alpha=alpha,
+                        prior_mean=prior_mean,
+                        prior_sd=prior_sd,
+                        target_assurance=target_assurance,
+                        target_power=target_power,
+                        alternative=alt
+                    )
+                    if result:
+                        # Also calculate expected power and assurance for display
+                        inputs["expected_power"] = calculate_expected_power(
+                            n=int(result),
+                            alpha=alpha,
+                            prior_mean=prior_mean,
+                            prior_sd=prior_sd,
+                            alternative=alt
+                        )
+                        inputs["achieved_assurance"] = calculate_assurance(
+                            n=int(result),
+                            alpha=alpha,
+                            prior_mean=prior_mean,
+                            prior_sd=prior_sd,
+                            target_power=target_power,
+                            alternative=alt
+                        )
+                elif goal == "Power":
+                    # Calculate expected power
+                    result = calculate_expected_power(
+                        n=n,
+                        alpha=alpha,
+                        prior_mean=prior_mean,
+                        prior_sd=prior_sd,
+                        alternative=alt
+                    )
+                    # Also calculate assurance
+                    inputs["assurance"] = calculate_assurance(
+                        n=n,
+                        alpha=alpha,
+                        prior_mean=prior_mean,
+                        prior_sd=prior_sd,
+                        target_power=0.80,
+                        alternative=alt
+                    )
+                else:  # MDES not applicable for Bayesian
+                    st.warning("MDES calculation not applicable for Bayesian methods.")
+                    return None
+
+            elif func_name == "calculate_single_proportion_power":
                 raw_vals = inputs.get("raw_vals", {})
                 result = calculate_single_proportion_power(
                     alpha=alpha,
@@ -1030,6 +1634,23 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
             elif goal == "Power":
                 result *= FISHER_ADJUSTMENTS["power"]
 
+        # Cluster-randomized adjustment
+        if config.get("cluster_randomized") and goal == "Sample Size":
+            cluster_size = inputs.get("cluster_size", 20)
+            icc = inputs.get("icc", 0.05)
+
+            # Calculate design effect and adjust sample size
+            total_n, n_clusters, deff = calculate_clusters_needed(result, cluster_size, icc)
+
+            # Store cluster information for display
+            inputs["individual_n"] = int(math.ceil(result))
+            inputs["cluster_adjusted_n"] = total_n
+            inputs["n_clusters"] = n_clusters
+            inputs["design_effect"] = deff
+
+            # Return individual-level sample size (display will show cluster details)
+            result = result  # Keep as individual n for now, display handles cluster info
+
         if goal == "Power":
             result = max(0.0, min(1.0, result))
 
@@ -1081,6 +1702,67 @@ def display_results(config: Dict, inputs: Dict, result: float):
             final_total = total_adj
         else:
             final_total = total
+
+        # Cluster-Randomized Results
+        if config.get("cluster_randomized") and inputs.get("design_effect"):
+            st.markdown("---")
+            st.subheader("📊 Cluster-Randomized Trial Results")
+
+            deff = inputs["design_effect"]
+            n_clusters = inputs["n_clusters"]
+            cluster_adj_n = inputs["cluster_adjusted_n"]
+            individual_n = inputs["individual_n"]
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Individual-Level N", f"{individual_n:d}")
+            with col2:
+                st.metric("Design Effect (DEFF)", f"{deff:.3f}")
+            with col3:
+                st.metric("Total N (Cluster-Adjusted)", f"{cluster_adj_n:d}")
+
+            st.info(f"**Number of Clusters Needed:** {n_clusters} clusters ({n_clusters//2} per group if equal allocation)")
+            st.warning(f"⚠️ The clustering inflates required sample size by {((deff-1)*100):.1f}%. This accounts for correlation within clusters (ICC={inputs.get('icc', 0.05):.3f}).")
+
+            final_total = cluster_adj_n  # Use cluster-adjusted for feasibility
+
+        # Bayesian Results
+        if config.get("bayesian"):
+            st.markdown("---")
+            st.subheader("🎲 Bayesian Sample Size Results")
+
+            if goal == "Sample Size":
+                exp_power = inputs.get("expected_power")
+                achieved_assurance = inputs.get("achieved_assurance")
+
+                if exp_power:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Expected Power", f"{exp_power:.3f}")
+                    with col2:
+                        st.metric("Achieved Assurance", f"{achieved_assurance:.3f}" if achieved_assurance else "N/A")
+
+                    st.info(f"**Expected Power:** Average power over your prior distribution: {exp_power:.1%}")
+                    st.info(f"**Assurance:** Probability of achieving ≥{inputs.get('target_power', 0.80):.0%} power: {achieved_assurance:.1%}" if achieved_assurance else "Assurance calculation in progress...")
+
+        # Repeated Measures Results
+        if config.get("repeated_measures"):
+            st.markdown("---")
+            st.subheader("🔁 Repeated Measures ANOVA Results")
+
+            num_meas = inputs.get("num_measurements", 3)
+            correlation = inputs.get("correlation", 0.5)
+            total_obs = n1 * num_meas
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Subjects Needed", f"{n1:d}")
+            with col2:
+                st.metric("Total Observations", f"{total_obs:d}")
+            with col3:
+                st.metric("Measurements/Subject", f"{num_meas:d}")
+
+            st.info(f"✅ **Within-subjects design advantage:** Correlation of {correlation:.2f} between measurements reduces required subjects compared to between-subjects design.")
 
         # Practical Guidance for Sample Size
         st.markdown("---")
@@ -1292,6 +1974,34 @@ def show_test_descriptions(test_name: str, config: Dict):
             ("Effect Size", "Hazard Ratio (HR) = ratio of hazard rates. HR < 1: reduced risk in Group 1. HR > 1: increased risk in Group 1. HR = 1: no difference.<br><b>Benchmarks:</b> HR=0.80 (small, 20% reduction), HR=0.65 (medium, 35% reduction), HR=0.50 (large, 50% reduction).", "hazard_ratio", False),
             ("Sample Size Calculation", "Uses Schoenfeld's formula. Calculates number of participants needed based on expected event rate and hazard ratio. Higher event rates require fewer participants to achieve the same number of events.", "schoenfeld", False),
             ("Event Probability", "The probability of observing an event during follow-up affects sample size. Lower event rates require larger sample sizes to observe sufficient events for adequate power.", "schoenfeld", False)
+        ],
+        "Cluster-Randomized t-test": [
+            ("Test Description", "Two-sample t-test adjusted for cluster randomization. Used when randomization occurs at cluster level (e.g., clinics, schools, communities) rather than individual level.", "donner_klar", True),
+            ("Assumptions", "<ol><li>Independence between clusters</li><li>Normality within groups</li><li>Observations correlated within clusters</li></ol>", "donner_klar", False),
+            ("Design Effect", "DEFF = 1 + (m-1)×ICC, where m is average cluster size and ICC is intra-cluster correlation. Sample size inflated by DEFF to account for clustering.", "icc_info", False),
+            ("ICC Guidance", "Typical ICC ranges: Primary care (0.01-0.05), Schools (0.05-0.20), Hospitals (0.01-0.10), Communities (0.001-0.05). Use pilot data or published values from similar studies.", "icc_info", False),
+            ("Practical Considerations", "Requires recruiting entire clusters. Larger ICC and cluster sizes increase required total sample size substantially. Consider trade-offs between number and size of clusters.", "donner_klar", False)
+        ],
+        "Cluster-Randomized Proportion Test": [
+            ("Test Description", "Two-proportion Z-test adjusted for cluster randomization. Compares proportions between groups when randomization is at cluster level.", "donner_klar", True),
+            ("Assumptions", "<ol><li>Independence between clusters</li><li>Binary outcome</li><li>Observations correlated within clusters</li><li>Large enough clusters for normal approximation</li></ol>", "donner_klar", False),
+            ("Design Effect", "Sample size inflated by DEFF = 1 + (m-1)×ICC. Higher ICC requires larger sample sizes.", "icc_info", False),
+            ("Practical Considerations", "Cluster-randomized trials are common in community interventions, school-based studies, and health system research.", "donner_klar", False)
+        ],
+        "Repeated Measures ANOVA": [
+            ("Test Description", "Within-subjects ANOVA for comparing means across multiple time points or conditions measured on the same subjects. More efficient than between-subjects designs when correlation is moderate to high.", "repeated_measures", True),
+            ("Assumptions", "<ol><li>Independence of subjects</li><li>Normality within conditions</li><li>Sphericity (equal variances of differences)</li><li>No carryover effects (if applicable)</li></ol>", "repeated_measures", False),
+            ("Design Advantage", "Within-subjects design requires fewer subjects than between-subjects when measurements are correlated. Higher correlation = greater efficiency.", "repeated_measures", False),
+            ("Correlation Parameter", "Average correlation between repeated measurements. Typical values: 0.3-0.7. Higher correlation means fewer subjects needed. Estimate from pilot data or literature.", "repeated_measures", False),
+            ("Practical Considerations", "Subjects must be available for all time points. Consider dropout and missing data. Appropriate for longitudinal studies, learning effects research, crossover designs.", "repeated_measures", False)
+        ],
+        "Bayesian Sample Size (Assurance)": [
+            ("Test Description", "Bayesian approach to sample size determination using assurance. Accounts for uncertainty in effect size by specifying a prior distribution. Calculates sample size to achieve target probability of success.", "bayesian_sample_size", True),
+            ("Assurance", "Probability of achieving target power given prior uncertainty about true effect size. Example: 80% assurance means 80% chance of achieving 80% power given your prior beliefs.", "assurance", False),
+            ("Prior Distribution", "Specifies belief about effect size before study. Skeptical prior (small effects), Optimistic prior (larger effects), or custom. Should be based on previous research, expert opinion, or pilot data.", "bayesian_sample_size", False),
+            ("Expected Power", "Average power over the prior distribution. More realistic than point estimate power when effect size is uncertain.", "bayesian_sample_size", False),
+            ("When to Use", "When substantial uncertainty exists about effect size, in early-phase research, when incorporating previous studies, or when conservative planning is needed.", "bayesian_sample_size", False),
+            ("Interpretation", "Bayesian methods provide probability statements about achieving success rather than frequentist guarantees. Useful for decision-making under uncertainty.", "assurance", False)
         ]
     }
 
@@ -1382,10 +2092,11 @@ def show_main_interface():
         st.session_state["selected_test"] = selected_test
     
     # Test category selection
-    categories = ["Parametric Tests", "Non-Parametric Tests", "Survival Analysis"]
+    categories = ["Parametric Tests", "Non-Parametric Tests", "Survival Analysis",
+                  "Cluster-Randomized", "Repeated Measures", "Bayesian Methods"]
     category = st.sidebar.radio("**1. Select Test Category:**", categories,
                                 key="test_category",
-                                help="Parametric: Assume specific distribution. Non-Parametric: Fewer assumptions. Survival: Time-to-event data.")
+                                help="Choose based on study design: Standard tests, Cluster-randomized, Repeated measures, or Bayesian approaches.")
 
     # Test selection
     if category == "Parametric Tests":
@@ -1395,8 +2106,16 @@ def show_main_interface():
     elif category == "Non-Parametric Tests":
         tests = ["Mann-Whitney U Test", "Wilcoxon Signed-Rank Test", "Kruskal-Wallis Test",
                  "Fisher's Exact Test"]
-    else:  # Survival Analysis
+    elif category == "Survival Analysis":
         tests = ["Log-Rank Test"]
+    elif category == "Cluster-Randomized":
+        tests = ["Cluster-Randomized t-test", "Cluster-Randomized Proportion Test"]
+    elif category == "Repeated Measures":
+        tests = ["Repeated Measures ANOVA"]
+    elif category == "Bayesian Methods":
+        tests = ["Bayesian Sample Size (Assurance)"]
+    else:
+        tests = []
 
     selected_test = st.sidebar.radio("Select Specific Test:", tests, key="selected_test")
 
@@ -1449,6 +2168,21 @@ with st.expander("📘 About this Calculator & User Guide", expanded=False):
 
     **Survival Analysis** (time-to-event data):
     - Log-Rank Test (Schoenfeld's formula)
+
+    **Cluster-Randomized Trials** (cluster-level randomization):
+    - Cluster-Randomized t-test (with ICC adjustment)
+    - Cluster-Randomized Proportion Test
+    - Automatic design effect calculation
+
+    **Repeated Measures** (within-subjects designs):
+    - Repeated Measures ANOVA
+    - Accounts for correlation between measurements
+    - More efficient than between-subjects when correlation is moderate-high
+
+    **Bayesian Methods** (incorporating prior uncertainty):
+    - Bayesian Sample Size (Assurance approach)
+    - Expected Power calculation
+    - Multiple prior distributions (Skeptical, Neutral, Optimistic, Custom)
 
     #### Enhanced Guidance Features:
     - **Interactive Test Selection Guide**: Answer simple questions to identify the appropriate test
@@ -1599,7 +2333,7 @@ with st.expander("📘 About this Calculator & User Guide", expanded=False):
     and critically evaluated by qualified researchers. For questions about statistical methods or study design,
     consult with a biostatistician or statistical collaborator.
 
-    **Version 1.2** - Enhanced with comprehensive guidance and practical context.
+    **Version 1.3** - Enhanced with comprehensive guidance, practical context, and advanced methods (Cluster-Randomized, Repeated Measures, Bayesian).
     """)
 
 # Sidebar
@@ -1633,4 +2367,4 @@ with st.expander("Library Versions & Reproducibility"):
     st.caption("For reproducibility, save as `requirements.txt`:")
     st.code("\n".join(versions), language='text')
 
-st.caption("Timothy P. Copeland | www.tcope.land | ©2025 | Calculator Version: 1.2 (Enhanced) | Geneva, CH")
+st.caption("Timothy P. Copeland | www.tcope.land | ©2025 | Calculator Version: 1.3 (Advanced Methods) | Geneva, CH")

@@ -426,9 +426,12 @@ def calculate_repeated_measures_power(n: int, effect_size: float, alpha: float,
     """
     Calculate power for repeated measures ANOVA (within-subjects design).
 
-    Uses adjustment for correlation between repeated measures.
-    Adjusted effect size: f_adj = f * sqrt(1 - ρ)
-    Where ρ is the average correlation between measurements.
+    Uses approximation based on ANOVA power adjusted for within-subjects correlation.
+    Higher correlation between measurements increases statistical power.
+
+    NOTE: This is an approximation. For exact calculations with specific
+    covariance structures, consult specialized software (G*Power, PANGEA) or
+    a statistician.
 
     Parameters:
     -----------
@@ -447,28 +450,34 @@ def calculate_repeated_measures_power(n: int, effect_size: float, alpha: float,
 
     Returns:
     --------
-    float : Statistical power (0 to 1)
+    float : Statistical power (0 to 1), or None if calculation fails
     """
     try:
+        # Input validation
         if correlation < 0 or correlation > 1:
             st.error("Correlation must be between 0 and 1")
             return None
 
-        # Adjust effect size for correlation
-        # Higher correlation = more efficient repeated measures design
-        epsilon = 1.0  # Sphericity assumption (can be adjusted)
-        f_adj = effect_size
+        # Warn about high correlations that may produce unreliable results
+        if correlation >= 0.90:
+            st.warning(f"⚠️ Very high correlation ({correlation:.2f}) may produce unreliable results. "
+                      "Consider using specialized software for exact calculations.")
 
-        # Calculate degrees of freedom
-        df_effect = (num_measurements - 1) * epsilon
-        df_error = (n - 1) * df_effect
+        # Warn about extreme correlations
+        if correlation >= 0.95:
+            st.error(f"❌ Correlation ≥ 0.95 is too high for this approximation. Results may be invalid. "
+                    f"Please use specialized repeated measures software (G*Power, PANGEA) or consult a statistician.")
+            return None
 
         # Use ANOVA power calculator with adjusted parameters
         power_calc = FTestAnovaPower()
 
-        # For repeated measures, effective n is larger due to within-subjects design
-        # Reduction factor due to correlation: 1 - ρ
-        effective_f = effect_size / np.sqrt(1 - correlation + 0.0001)  # Avoid division by zero
+        # Adjust effective sample size for within-subjects correlation
+        # Higher correlation reduces variance of differences, increasing power
+        # Approximation: effective_f ≈ f / sqrt(1 - ρ)
+        # Cap correlation effect to prevent numerical instability
+        correlation_capped = min(correlation, 0.89)  # Cap at 0.89 for stability
+        effective_f = effect_size / np.sqrt(max(1 - correlation_capped, 0.11))
 
         power = power_calc.solve_power(
             effect_size=effective_f,
@@ -488,6 +497,10 @@ def calculate_repeated_measures_n(effect_size: float, alpha: float, power: float
                                   num_measurements: int, correlation: float) -> Optional[int]:
     """
     Calculate required number of subjects for repeated measures ANOVA.
+
+    NOTE: This is an approximation. For exact calculations with specific
+    covariance structures, consult specialized software (G*Power, PANGEA) or
+    a statistician.
 
     Parameters:
     -----------
@@ -511,8 +524,25 @@ def calculate_repeated_measures_n(effect_size: float, alpha: float, power: float
             st.error("Correlation must be between 0 and 1")
             return None
 
-        # Adjust effect size for correlation
-        effective_f = effect_size / np.sqrt(1 - correlation + 0.0001)
+        # Warn about high correlations
+        if correlation >= 0.90:
+            st.warning(
+                f"⚠️ Very high correlation ({correlation:.2f}) may produce unreliable results. "
+                "Consider consulting specialized software (G*Power, PANGEA) or a statistician."
+            )
+
+        # Hard stop for extreme correlations
+        if correlation >= 0.95:
+            st.error(
+                f"❌ Correlation ≥ 0.95 is too high for this approximation. "
+                "Please use specialized software for accurate sample size estimation."
+            )
+            return None
+
+        # Cap correlation to prevent numerical instability
+        # At high correlations, the adjustment formula becomes unstable
+        correlation_capped = min(correlation, 0.89)  # Cap at 0.89 for stability
+        effective_f = effect_size / np.sqrt(max(1 - correlation_capped, 0.11))
 
         # Use ANOVA power calculator
         power_calc = FTestAnovaPower()
@@ -587,7 +617,8 @@ def calculate_assurance(n: int, alpha: float, prior_mean: float, prior_sd: float
                         alternative=alternative
                     )
                     powers.append(pwr if math.isfinite(pwr) else 0)
-                except:
+                except Exception as e:
+                    # Handle numerical errors gracefully during Monte Carlo simulation
                     powers.append(0)
             else:
                 powers.append(0)
@@ -699,7 +730,8 @@ def calculate_expected_power(n: int, alpha: float, prior_mean: float, prior_sd: 
                         alternative=alternative
                     )
                     powers.append(pwr if math.isfinite(pwr) else 0)
-                except:
+                except Exception as e:
+                    # Handle numerical errors gracefully during Monte Carlo simulation
                     powers.append(0)
             else:
                 powers.append(0)
@@ -939,6 +971,10 @@ def calculate_logrank_power(alpha: float, alternative: str, power: Optional[floa
         st.error("Probability of event must be between 0 and 1.")
         return None
 
+    if ratio <= 0:
+        st.error("Sample size ratio must be positive.")
+        return None
+
     try:
         # Critical values
         alpha_crit = alpha / 2 if alternative == "two-sided" else alpha
@@ -959,12 +995,26 @@ def calculate_logrank_power(alpha: float, alternative: str, power: Optional[floa
             # Expected number of events
             d = n_total * prob_event
 
+            # Check for sufficient expected events
+            if d < 1:
+                st.error(
+                    f"Expected number of events too small ({d:.2f} < 1). "
+                    f"Either increase sample size or increase probability of event."
+                )
+                return None
+
             # Proportion in each group
             p1 = nobs1 / n_total
             p2 = n2 / n_total
 
+            # Validate denominator for variance calculation
+            denominator = d * p1 * p2
+            if denominator <= 0 or not math.isfinite(denominator):
+                st.error("Invalid variance calculation: check sample sizes and group allocation.")
+                return None
+
             # Variance of log(HR) estimator
-            var_theta = 1 / (d * p1 * p2)
+            var_theta = 1 / denominator
 
             # Calculate power
             # Test statistic under alternative: z_obs ~ N(theta/sqrt(var), 1)
@@ -1639,17 +1689,22 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
             cluster_size = inputs.get("cluster_size", 20)
             icc = inputs.get("icc", 0.05)
 
-            # Calculate design effect and adjust sample size
-            total_n, n_clusters, deff = calculate_clusters_needed(result, cluster_size, icc)
+            try:
+                # Calculate design effect and adjust sample size
+                total_n, n_clusters, deff = calculate_clusters_needed(result, cluster_size, icc)
 
-            # Store cluster information for display
-            inputs["individual_n"] = int(math.ceil(result))
-            inputs["cluster_adjusted_n"] = total_n
-            inputs["n_clusters"] = n_clusters
-            inputs["design_effect"] = deff
+                # Store cluster information for display
+                inputs["individual_n"] = int(math.ceil(result))
+                inputs["cluster_adjusted_n"] = total_n
+                inputs["n_clusters"] = n_clusters
+                inputs["design_effect"] = deff
 
-            # Return individual-level sample size (display will show cluster details)
-            result = result  # Keep as individual n for now, display handles cluster info
+                # Return individual-level sample size (display will show cluster details)
+                result = result  # Keep as individual n for now, display handles cluster info
+            except ValueError as e:
+                st.error(f"Cluster calculation error: {e}")
+                # Fall back to individual-level calculation without cluster adjustment
+                st.warning("Falling back to individual-level calculation (no cluster adjustment).")
 
         if goal == "Power":
             result = max(0.0, min(1.0, result))
@@ -2295,12 +2350,10 @@ with st.expander("📘 About this Calculator & User Guide", expanded=False):
     - Survival analysis assumes proportional hazards (constant hazard ratio over time)
 
     #### This Calculator Does NOT Handle:
-    - Cluster randomized trials (requires inflation for intra-cluster correlation)
     - Crossover designs (requires modeling of period effects and carryover)
     - Multiple comparison adjustments (Bonferroni, FDR, etc.)
     - Interim analysis adjustments (O'Brien-Fleming, Lan-DeMets alpha spending)
     - Complex adaptive designs
-    - Bayesian sample size determination
     - Non-inferiority margins (must be specified separately)
 
     #### Best Practice Recommendations:

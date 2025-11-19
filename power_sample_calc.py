@@ -107,7 +107,71 @@ CITATIONS = {
 #                           HELPER FUNCTIONS
 # ==============================================================================
 def calculate_effect_size(effect_type: str, **kwargs) -> Optional[float]:
-    """Unified effect size calculator with improved error handling."""
+    """
+    Calculate standardized effect size from raw values.
+
+    Supports multiple effect size types used across different statistical tests.
+    Returns absolute value of effect size since power calculations use magnitude only.
+
+    Parameters:
+    -----------
+    effect_type : str
+        Type of effect size to calculate:
+        - "cohen_d_two": Two-sample Cohen's d (independent groups)
+        - "cohen_d_one": One-sample Cohen's d (single group vs null)
+        - "cohen_d_paired": Paired Cohen's d (within-subjects)
+        - "cohen_h": Cohen's h (difference in proportions)
+    **kwargs :
+        Raw values needed for calculation (depends on effect_type):
+
+        For "cohen_d_two":
+            - mean1 (float): Mean of group 1
+            - mean2 (float): Mean of group 2
+            - pooled_sd (float): Pooled standard deviation (must be > 0)
+
+        For "cohen_d_one":
+            - sample_mean (float): Expected sample mean
+            - hypothesized_mean (float): Null hypothesis value (usually population mean)
+            - sd (float): Standard deviation (must be > 0)
+
+        For "cohen_d_paired":
+            - mean_diff (float): Mean of paired differences
+            - sd_diff (float): Standard deviation of differences (must be > 0)
+
+        For "cohen_h":
+            - p1 (float): Proportion 1 (must be 0 < p1 < 1, exclusive)
+            - p2 (float): Proportion 2 (must be 0 < p2 < 1, exclusive)
+
+    Returns:
+    --------
+    float or None
+        Calculated effect size (absolute value), or None if:
+        - Missing required parameters
+        - Invalid values (e.g., SD ≤ 0, proportions outside (0,1))
+        - Calculation error occurs
+
+    Notes:
+    ------
+    Cohen's h transformation: h = 2 * (arcsin(√p1) - arcsin(√p2))
+    This requires 0 < p < 1 (exclusive) because arcsin(√0) and arcsin(√1) are
+    boundary values that can cause numerical issues.
+
+    Examples:
+    ---------
+    >>> calculate_effect_size("cohen_d_two", mean1=10, mean2=12, pooled_sd=3)
+    0.6667
+
+    >>> calculate_effect_size("cohen_h", p1=0.3, p2=0.5)
+    0.4115
+
+    >>> calculate_effect_size("cohen_d_one", sample_mean=105, hypothesized_mean=100, sd=15)
+    0.3333
+
+    References:
+    -----------
+    - Cohen, J. (1988). Statistical power analysis for the behavioral sciences.
+    - Cohen's h: https://en.wikipedia.org/wiki/Cohen%27s_h
+    """
     try:
         if effect_type == "cohen_d_two":
             mean1, mean2, pooled_sd = kwargs.get('mean1'), kwargs.get('mean2'), kwargs.get('pooled_sd')
@@ -136,6 +200,9 @@ def display_explanation(header: str, content: str, citation_key: Optional[str] =
     with st.expander(header, expanded=expanded):
         if help_text:
             st.caption(f":information_source: {help_text}")
+        # SECURITY NOTE: unsafe_allow_html=True is safe here because all content
+        # is statically defined in this source code file, not user-provided.
+        # All HTML content comes from hardcoded test descriptions below.
         st.markdown(content, unsafe_allow_html=True)
         if citation_key and citation_key in CITATIONS:
             text, url = CITATIONS[citation_key]
@@ -154,7 +221,78 @@ def display_results_table(data: Dict[str, List[Any]]) -> None:
 
 
 def check_expected_counts(test_type: str, n1: float, n_ratio: float, raw_inputs: Dict, show_warning: bool = False):
-    """Check expected counts for proportion tests with enhanced guidance."""
+    """
+    Validate expected cell counts for proportion tests to ensure normal approximation validity.
+
+    The normal approximation to binomial/multinomial distributions is only valid when
+    expected counts in all cells are sufficiently large. This function checks if the
+    expected counts meet standard thresholds and warns users if assumptions are violated.
+
+    Rule-of-thumb thresholds:
+    - Expected count ≥ 10: Excellent approximation, normal methods fully valid
+    - Expected count 5-10: Adequate approximation, acceptable for most purposes
+    - Expected count < 5: Poor approximation, use exact methods (Fisher's exact test)
+
+    Parameters:
+    -----------
+    test_type : str
+        Either "two_prop" (two-sample proportions) or "one_prop" (single proportion)
+    n1 : float
+        Sample size for group 1 (or total sample for one_prop).
+        Will be converted to int internally.
+    n_ratio : float
+        Sample size ratio N2/N1 (for two_prop only).
+        Ignored for one_prop.
+    raw_inputs : Dict
+        Dictionary containing proportion values:
+        - For "two_prop": must contain "prop1" and "prop2"
+        - For "one_prop": must contain "null_prop" and "sample_prop"
+    show_warning : bool, default=False
+        If True, show warnings in main content area (st.warning/st.info)
+        If False, show warnings in sidebar (st.sidebar.warning/info)
+
+    Returns:
+    --------
+    None
+        Displays warnings/info messages via Streamlit widgets.
+        Does not return a value or raise exceptions.
+
+    Expected Count Calculations:
+    ----------------------------
+    Two-sample proportions:
+        E1 = n1 * p1  and  E2 = n1 * n_ratio * p2
+        Checks: min(n1*p1, n1*(1-p1), n2*p2, n2*(1-p2))
+
+    Single proportion:
+        E_null = n1 * p0  and  E_sample = n1 * p_expected
+        Checks: min(n1*p0, n1*(1-p0))
+
+    Examples:
+    ---------
+    >>> # Two-sample proportions with adequate counts
+    >>> check_expected_counts("two_prop", n1=50, n_ratio=1.0,
+    ...                      raw_inputs={"prop1": 0.3, "prop2": 0.5})
+    # Shows info: minimum expected count = 15 (good approximation)
+
+    >>> # Single proportion with low counts
+    >>> check_expected_counts("one_prop", n1=20, n_ratio=1.0,
+    ...                      raw_inputs={"null_prop": 0.1, "sample_prop": 0.2})
+    # Shows warning: minimum expected count = 2 (use exact methods)
+
+    Notes:
+    ------
+    - This check is critical for validity of Z-tests for proportions
+    - When counts are inadequate, recommend Fisher's exact test or
+      exact binomial test instead
+    - Some texts use threshold of 5, others use 10; we use both with
+      different warning levels
+
+    References:
+    -----------
+    - Agresti, A. (2007). An Introduction to Categorical Data Analysis, 2nd ed.
+    - Cochran, W.G. (1954). Some methods for strengthening the common χ² tests.
+      Biometrics, 10(4), 417-451.
+    """
     if test_type == "two_prop":
         p1, p2 = raw_inputs.get("prop1"), raw_inputs.get("prop2")
         if n1 is not None and p1 is not None and p2 is not None:
@@ -293,10 +431,13 @@ The sample size calculation for this {objective.lower()} study using a **{test_n
         text += f"- **Total: {n1} participants**\n"
 
     if dropout > 0:
-        n1_adj = int(np.ceil(n1 / (1 - dropout / 100)))
-        total_adj = n1_adj * k if not n2 else n1_adj + int(np.ceil(n1_adj * n_ratio))
-        text += f"\n**Adjusted for {dropout}% expected dropout:**\n"
-        text += f"- **Total recruitment target: {total_adj} participants**\n"
+        if dropout >= 100:
+            text += f"\n**⚠️ WARNING: Dropout rate of {dropout}% is invalid (must be < 100%)**\n"
+        else:
+            n1_adj = int(np.ceil(n1 / (1 - dropout / 100)))
+            total_adj = n1_adj * k if not n2 else n1_adj + int(np.ceil(n1_adj * n_ratio))
+            text += f"\n**Adjusted for {dropout}% expected dropout:**\n"
+            text += f"- **Total recruitment target: {total_adj} participants**\n"
 
     text += f"""
 **Justification:**
@@ -373,8 +514,8 @@ def calculate_design_effect(icc: float, cluster_size: float) -> float:
     """
     if icc < 0 or icc > 1:
         raise ValueError("ICC must be between 0 and 1")
-    if cluster_size < 1:
-        raise ValueError("Cluster size must be at least 1")
+    if cluster_size < 2:
+        raise ValueError("Cluster size must be at least 2 (a cluster with only 1 participant is not meaningful)")
 
     return 1 + (cluster_size - 1) * icc
 
@@ -426,12 +567,22 @@ def calculate_repeated_measures_power(n: int, effect_size: float, alpha: float,
     """
     Calculate power for repeated measures ANOVA (within-subjects design).
 
+    ⚠️ WARNING: This uses a simplified approximation that adjusts between-subjects
+    ANOVA power for within-subjects correlation. This approximation may not be
+    accurate for all covariance structures and may produce different results than
+    specialized repeated measures software.
+
+    LIMITATION: The current implementation does not use proper within-subjects
+    degrees of freedom calculations per Muller & Barton (1989). Results should be
+    considered rough estimates only.
+
+    For rigorous sample size justification, use specialized software such as:
+    - G*Power (free, supports various RM designs)
+    - PASS/nQuery (commercial, comprehensive)
+    - SAS PROC POWER (RM ANOVA procedures)
+
     Uses approximation based on ANOVA power adjusted for within-subjects correlation.
     Higher correlation between measurements increases statistical power.
-
-    NOTE: This is an approximation. For exact calculations with specific
-    covariance structures, consult specialized software (G*Power, PANGEA) or
-    a statistician.
 
     Parameters:
     -----------
@@ -498,9 +649,17 @@ def calculate_repeated_measures_n(effect_size: float, alpha: float, power: float
     """
     Calculate required number of subjects for repeated measures ANOVA.
 
-    NOTE: This is an approximation. For exact calculations with specific
-    covariance structures, consult specialized software (G*Power, PANGEA) or
-    a statistician.
+    ⚠️ WARNING: This uses a simplified approximation that may not accurately
+    represent true repeated measures designs. The calculation adjusts between-
+    subjects ANOVA for correlation but does not use proper within-subjects
+    degrees of freedom per Muller & Barton (1989).
+
+    For protocol submissions and rigorous analysis, use specialized software:
+    - G*Power (free, supports various RM designs)
+    - PASS/nQuery (commercial, comprehensive)
+    - SAS PROC POWER (RM ANOVA procedures)
+
+    Results from this function should be considered preliminary estimates only.
 
     Parameters:
     -----------
@@ -559,6 +718,12 @@ def calculate_repeated_measures_n(effect_size: float, alpha: float, power: float
         # Convert to number of subjects
         n_subjects = math.ceil(total_obs / num_measurements)
 
+        # Validate result
+        if n_subjects <= 0 or not math.isfinite(n_subjects):
+            st.error(f"Sample size calculation resulted in invalid value ({n_subjects}). "
+                    "Please check your parameters (effect size, correlation, etc.).")
+            return None
+
         return max(3, n_subjects)  # Minimum 3 subjects
 
     except Exception as e:
@@ -601,7 +766,13 @@ def calculate_assurance(n: int, alpha: float, prior_mean: float, prior_sd: float
         # Monte Carlo integration over prior distribution
         n_samples = 10000
         effect_sizes = np.random.normal(prior_mean, prior_sd, n_samples)
-        effect_sizes = np.abs(effect_sizes)  # Use absolute values
+
+        # IMPORTANT: Effect sizes are converted to absolute values because Cohen's d
+        # in power calculations is unsigned (represents magnitude of difference).
+        # This creates a folded normal distribution. Negative samples from the prior
+        # are reflected to positive values, which may overestimate assurance if the
+        # prior mean is close to zero. Users should specify priors with mean > 0.
+        effect_sizes = np.abs(effect_sizes)
 
         powers = []
         power_calc = TTestIndPower()
@@ -714,6 +885,11 @@ def calculate_expected_power(n: int, alpha: float, prior_mean: float, prior_sd: 
         # Monte Carlo integration
         n_samples = 10000
         effect_sizes = np.random.normal(prior_mean, prior_sd, n_samples)
+
+        # IMPORTANT: Effect sizes are converted to absolute values because Cohen's d
+        # in power calculations is unsigned (represents magnitude of difference).
+        # This creates a folded normal distribution. Negative samples are reflected
+        # to positive values. Users should specify priors with mean > 0 for accuracy.
         effect_sizes = np.abs(effect_sizes)
 
         powers = []
@@ -1464,7 +1640,79 @@ def handle_hazard_ratio_inputs(config: Dict, key: str) -> Dict:
 
 
 def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
-    """Perform the power calculation with improved error handling."""
+    """
+    Perform power/sample size calculation for the selected statistical test.
+
+    This is the central calculation engine that handles all test types including
+    parametric, non-parametric, survival, cluster-randomized, repeated measures,
+    and Bayesian methods. It applies appropriate adjustments (ARE, Fisher, DEFF)
+    based on test configuration.
+
+    Parameters:
+    -----------
+    config : Dict
+        Test configuration from get_test_config() containing:
+        - 'class' or 'func': Calculation method (statsmodels class or custom function)
+        - 'effect': Effect size type (cohen_d_two, cohen_h, cohen_f, hazard_ratio, etc.)
+        - 'are': Asymptotic Relative Efficiency factor (if non-parametric test)
+        - 'fisher': Fisher exact test flag (if applicable)
+        - 'cluster_randomized': Cluster-randomized trial flag
+        - 'bayesian': Bayesian methods flag
+        - 'repeated_measures': Repeated measures design flag
+        - Other test-specific parameters
+    inputs : Dict
+        User inputs from collect_inputs() containing:
+        - 'goal': "Sample Size", "Power", or "MDES"
+        - 'effect_size': Standardized effect size (if applicable)
+        - 'n': Sample size (if calculating power/MDES)
+        - 'power': Desired power (if calculating sample size)
+        - 'alpha': Significance level
+        - 'alternative': Alternative hypothesis type ('two-sided', 'larger', 'smaller')
+        - 'dropout': Expected dropout rate percentage (optional)
+        - Test-specific parameters:
+          * cluster_size, icc: For cluster-randomized trials
+          * num_measurements, correlation: For repeated measures
+          * prior_mean, prior_sd: For Bayesian methods
+          * prob_event, hr: For survival analysis
+
+    Returns:
+    --------
+    float or None
+        - For Sample Size: Required sample size (N1, individual-level)
+        - For Power: Statistical power (0 to 1)
+        - For MDES: Minimum detectable effect size
+        - None if calculation fails or validation errors occur
+
+    Side Effects:
+    -------------
+    - Modifies inputs dict to add calculated values:
+      * Cluster-randomized: individual_n, cluster_adjusted_n, n_clusters, design_effect
+      * Bayesian: expected_power, assurance
+      * Repeated measures: total_observations
+    - Displays warnings/errors via Streamlit for validation failures
+    - Displays info messages for large sample sizes or unusual parameters
+
+    Notes:
+    ------
+    - Applies ARE adjustments for non-parametric tests (Wilcoxon, Mann-Whitney, Kruskal-Wallis)
+    - Applies Fisher exact test adjustments (conservative multipliers)
+    - Calculates design effect for cluster-randomized trials using DEFF = 1 + (m-1)*ICC
+    - Uses Monte Carlo simulation (10,000 samples) for Bayesian assurance calculations
+    - Validates sample size reasonableness (warns if > 100k, errors if > 1M)
+    - Validates dropout rates (must be < 100%)
+
+    Examples:
+    ---------
+    >>> config = {"class": TTestIndPower, "effect": "cohen_d_two", "n_ratio": True}
+    >>> inputs = {"goal": "Sample Size", "effect_size": 0.5, "power": 0.8, "alpha": 0.05, "alternative": "two-sided"}
+    >>> n = perform_calculation(config, inputs)
+    >>> print(f"Required sample size: {n}")
+
+    References:
+    -----------
+    - Cohen, J. (1988). Statistical power analysis for the behavioral sciences.
+    - Donner & Klar (2000). Design and Analysis of Cluster Randomization Trials.
+    """
     goal = inputs["goal"]
     effect = inputs.get("effect_size")
     n = inputs.get("n")
@@ -1515,9 +1763,13 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
 
     # Apply ARE adjustment
     are_factor = ARE_FACTORS.get(config.get("are"))
-    if are_factor:
+    if are_factor is not None and are_factor > 0:
         if goal in ["Power", "MDES"] and effect is not None:
             effect *= np.sqrt(are_factor)
+    elif config.get("are"):
+        # ARE adjustment requested but factor not found or invalid
+        st.error(f"Invalid ARE adjustment factor for {config.get('are')}")
+        return None
 
     # Prepare calculation arguments
     try:
@@ -1709,11 +1961,123 @@ def perform_calculation(config: Dict, inputs: Dict) -> Optional[float]:
         if goal == "Power":
             result = max(0.0, min(1.0, result))
 
+    # Validate sample size reasonableness
+    if goal == "Sample Size" and result is not None:
+        if result > 1000000:
+            st.error(f"⚠️ Calculated sample size ({result:,.0f}) exceeds reasonable limits (> 1 million). "
+                    "This may indicate:\n"
+                    "- Effect size is too small to detect practically\n"
+                    "- Unrealistic study parameters\n"
+                    "- Numerical calculation errors\n\n"
+                    "Consider:\n"
+                    "- Increasing your minimum detectable effect size\n"
+                    "- Revising your study design\n"
+                    "- Consulting a statistician")
+            return None
+        elif result > 100000:
+            st.warning(f"⚠️ Calculated sample size ({result:,.0f}) is very large (> 100,000). "
+                      "Please verify your effect size is realistic and achievable.")
+
     return result
 
 
 def display_results(config: Dict, inputs: Dict, result: float):
-    """Display calculation results with enhanced guidance and practical context."""
+    """
+    Display comprehensive calculation results with guidance and practical context.
+
+    Generates a multi-section results display including primary metrics, adjustments,
+    practical guidance, and study planning information tailored to the calculation type.
+
+    Parameters:
+    -----------
+    config : Dict
+        Test configuration from get_test_config() containing display formatting
+        options such as n_labels, cluster_randomized, bayesian, repeated_measures flags
+    inputs : Dict
+        All user inputs plus calculated parameters from perform_calculation() including:
+        - 'goal': "Sample Size", "Power", or "MDES"
+        - Primary inputs (effect_size, n, power, alpha, etc.)
+        - Dropout rate (if applicable)
+        - Cluster-randomized results (if applicable):
+          * individual_n, cluster_adjusted_n, n_clusters, design_effect
+        - Bayesian results (if applicable):
+          * expected_power, assurance, prior_mean, prior_sd
+        - Repeated measures results (if applicable):
+          * num_measurements, correlation
+    result : float
+        Primary calculation result:
+        - Sample size (N1, individual-level) if goal is "Sample Size"
+        - Statistical power (0-1) if goal is "Power"
+        - Minimum detectable effect size if goal is "MDES"
+
+    Returns:
+    --------
+    None
+        Displays results via Streamlit widgets (st.metric, st.markdown, st.expander, etc.)
+
+    Display Sections:
+    -----------------
+    1. **Primary Result Metrics** (always shown):
+       - Sample size(s), power, or MDES displayed as st.metric cards
+       - Multiple metrics for multi-group designs (N1, N2, Total)
+
+    2. **Dropout Adjustments** (if dropout > 0):
+       - Recruitment targets adjusted for expected attrition
+       - Delta showing increase from original sample size
+
+    3. **Cluster-Randomized Results** (if cluster_randomized):
+       - Design effect (DEFF)
+       - Number of clusters needed
+       - Total cluster-adjusted sample size
+       - Explanation of cluster design implications
+
+    4. **Bayesian Results** (if bayesian):
+       - Expected power (average over prior distribution)
+       - Assurance (probability of achieving target power)
+       - Prior distribution summary
+       - Interpretation of Bayesian metrics
+
+    5. **Repeated Measures Results** (if repeated_measures):
+       - Number of subjects vs total observations
+       - Correlation assumptions
+       - Efficiency gains from repeated measurements
+
+    6. **Recruitment Feasibility Assessment**:
+       - Classification (easy/moderate/challenging/very difficult)
+       - Estimated timeline in months
+       - Practical recruitment considerations
+
+    7. **Effect Size Validation**:
+       - Warnings if effect size is unrealistically large or small
+       - Comparison to Cohen's benchmarks
+       - Recommendations based on effect size magnitude
+
+    8. **Sample Size Justification** (for Sample Size goal):
+       - Protocol-ready text summarizing the calculation
+       - All assumptions and parameters
+       - Statistical justification language
+
+    9. **Summary Table**:
+       - Complete list of all inputs and assumptions
+       - Easy reference for documentation
+
+    10. **Best Practices & Pitfalls**:
+        - Common mistakes to avoid
+        - Recommendations specific to the test type
+        - Regulatory considerations (if applicable)
+
+    Notes:
+    ------
+    - Display adapts based on inputs['goal'] and test type
+    - Uses color-coded metrics (green for adequate, yellow for warnings)
+    - Provides copy-pasteable justification text for protocols
+    - All guidance is evidence-based and includes citations where applicable
+
+    Side Effects:
+    -------------
+    - Modifies Streamlit session state (display only, no calculation changes)
+    - May show warnings, errors, or info messages based on parameter values
+    """
     goal = inputs["goal"]
     test_name = st.session_state.get("selected_test", "Statistical Test")
 
@@ -1739,22 +2103,26 @@ def display_results(config: Dict, inputs: Dict, result: float):
         # Dropout adjustment
         dropout = inputs.get("dropout", 0)
         if dropout > 0:
-            st.markdown("---")
-            st.subheader(f"Adjusted for {dropout}% Dropout:")
-            n1_adj = int(np.ceil(n1 / (1 - dropout / 100)))
-            n2_adj = int(np.ceil(n1_adj * n_ratio)) if n2 else None
-            total_adj = n1_adj * k if not n2 else n1_adj + (n2_adj or 0)
+            if dropout >= 100:
+                st.error(f"⚠️ Dropout rate of {dropout}% is invalid (must be < 100%). "
+                        "Cannot calculate adjusted sample size.")
+            else:
+                st.markdown("---")
+                st.subheader(f"Adjusted for {dropout}% Dropout:")
+                n1_adj = int(np.ceil(n1 / (1 - dropout / 100)))
+                n2_adj = int(np.ceil(n1_adj * n_ratio)) if n2 else None
+                total_adj = n1_adj * k if not n2 else n1_adj + (n2_adj or 0)
 
-            adj_vals = [n1_adj]
-            if n2_adj: adj_vals.append(n2_adj)
-            if len(labels) > len(adj_vals): adj_vals.append(total_adj)
+                adj_vals = [n1_adj]
+                if n2_adj: adj_vals.append(n2_adj)
+                if len(labels) > len(adj_vals): adj_vals.append(total_adj)
 
-            adj_cols = st.columns(len(adj_vals))
-            for i, (col, label, val, orig) in enumerate(zip(adj_cols, labels, adj_vals, vals)):
-                with col:
-                    st.metric(f"Adj. {label}", f"{val:d}", delta=f"{val - orig:d} increase")
+                adj_cols = st.columns(len(adj_vals))
+                for i, (col, label, val, orig) in enumerate(zip(adj_cols, labels, adj_vals, vals)):
+                    with col:
+                        st.metric(f"Adj. {label}", f"{val:d}", delta=f"{val - orig:d} increase")
 
-            final_total = total_adj
+                final_total = total_adj
         else:
             final_total = total
 
@@ -1970,62 +2338,62 @@ def show_test_descriptions(test_name: str, config: Dict):
         "Two-Sample Independent Groups t-test": [
             ("Test Description", "Compares means of a continuous outcome between two **independent** groups.",
              "basic_biostats", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Normality within groups</li><li>Equal variances", "basic_biostats", False),
+            ("Assumptions", "<ol><li>Independence</li><li>Normality within groups</li><li>Equal variances</li></ol>", "basic_biostats", False),
             ("Effect Size", "Cohen's d = |μ₁ - μ₂| / σ_pooled. Benchmarks: 0.2(S), 0.5(M), 0.8(L)", "cohen_1988", False)
         ],
         "One-Sample t-test": [
             ("Test Description", "Compares mean from a single group to a hypothesized value.", "basic_biostats", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Normality", "basic_biostats", False),
+            ("Assumptions", "<ol><li>Independence</li><li>Normality</li></ol>", "basic_biostats", False),
             ("Effect Size", "d = |μ - μ₀| / σ", "cohen_1988", False)
         ],
         "Paired t-test": [
             ("Test Description", "Compares means for related samples (e.g., pre/post).", "basic_biostats", True),
-            ("Assumptions", "<ol><li>Paired data</li><li>Independence of pairs</li><li>Normality of differences", "basic_biostats",
+            ("Assumptions", "<ol><li>Paired data</li><li>Independence of pairs</li><li>Normality of differences</li></ol>", "basic_biostats",
              False),
             ("Effect Size", "d_z = |μ_diff| / σ_diff", "cohen_1988", False)
         ],
         "Z-test: Two Independent Proportions": [
             ("Test Description", "Compares proportions between two independent groups.", "basic_biostats", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Binary outcome</li><li>Large sample (expected counts > 5)",
+            ("Assumptions", "<ol><li>Independence</li><li>Binary outcome</li><li>Large sample (expected counts > 5)</li></ol>",
              "normal_approx_prop", False)
         ],
         "Z-test: Single Proportion": [
             ("Test Description", "Compares observed proportion to hypothesized value.", "basic_biostats", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Binary outcome</li><li>n*p₀ > 5 and n*(1-p₀) > 5", "normal_approx_prop",
+            ("Assumptions", "<ol><li>Independence</li><li>Binary outcome</li><li>n*p₀ > 5 and n*(1-p₀) > 5</li></ol>", "normal_approx_prop",
              False)
         ],
         "One-Way ANOVA (Between Subjects)": [
             ("Test Description", "Compares means across 3+ independent groups.", "basic_biostats", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Normality within groups</li><li>Equal variances", "basic_biostats", False),
+            ("Assumptions", "<ol><li>Independence</li><li>Normality within groups</li><li>Equal variances</li></ol>", "basic_biostats", False),
             ("Effect Size", "Cohen's f = σ_means / σ_within. Benchmarks: 0.10(S), 0.25(M), 0.40(L)", "cohen_f_info",
              False)
         ],
         "Mann-Whitney U Test": [
             ("Test Description", "Non-parametric alternative to two-sample t-test.", "mann_whitney", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Ordinal/continuous data</li><li>Similar shapes for median comparison",
+            ("Assumptions", "<ol><li>Independence</li><li>Ordinal/continuous data</li><li>Similar shapes for median comparison</li></ol>",
              "mann_whitney", False),
             ("Approximation", f"Uses t-test with ARE ≈ {ARE_FACTORS['mann_whitney']:.3f}", "are_info", False)
         ],
         "Wilcoxon Signed-Rank Test": [
             ("Test Description", "Non-parametric alternative to paired t-test or one-sample t-test.",
              "wilcoxon_signed_rank", True),
-            ("Assumptions", "<ol><li>Paired/single sample</li><li>Independence</li><li>Symmetry around median", "wilcoxon_signed_rank",
+            ("Assumptions", "<ol><li>Paired/single sample</li><li>Independence</li><li>Symmetry around median</li></ol>", "wilcoxon_signed_rank",
              False),
             ("Approximation", f"Uses t-test with ARE ≈ {ARE_FACTORS['wilcoxon']:.3f}", "are_info", False)
         ],
         "Kruskal-Wallis Test": [
             ("Test Description", "Non-parametric alternative to one-way ANOVA.", "kruskal_wallis", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Ordinal/continuous</li><li>Similar shapes", "kruskal_wallis", False),
+            ("Assumptions", "<ol><li>Independence</li><li>Ordinal/continuous</li><li>Similar shapes</li></ol>", "kruskal_wallis", False),
             ("Approximation", f"Uses ANOVA with ARE ≈ {ARE_FACTORS['kruskal_wallis']:.3f}", "are_info", False)
         ],
         "Fisher's Exact Test": [
             ("Test Description", "Exact test for 2x2 tables, best for small samples.", "fishers_exact", True),
-            ("Assumptions", "<ol><li>Independence</li><li>Binary outcome</li><li>Fixed margins", "fishers_exact", False),
+            ("Assumptions", "<ol><li>Independence</li><li>Binary outcome</li><li>Fixed margins</li></ol>", "fishers_exact", False),
             ("Approximation", "Uses Z-test with heuristic adjustments", "statsmodels_prop", False)
         ],
         "Log-Rank Test": [
             ("Test Description", "Compares survival curves between two groups. Used for time-to-event data (e.g., time to death, disease progression, or recurrence).", "logrank_test", True),
-            ("Assumptions", "<ol><li>Independence of observations</li><li>Censoring is non-informative</li><li>Proportional hazards (hazard ratio constant over time)</li><li>Similar censoring patterns between groups", "logrank_test", False),
+            ("Assumptions", "<ol><li>Independence of observations</li><li>Censoring is non-informative</li><li>Proportional hazards (hazard ratio constant over time)</li><li>Similar censoring patterns between groups</li></ol>", "logrank_test", False),
             ("Effect Size", "Hazard Ratio (HR) = ratio of hazard rates. HR < 1: reduced risk in Group 1. HR > 1: increased risk in Group 1. HR = 1: no difference.<br><b>Benchmarks:</b> HR=0.80 (small, 20% reduction), HR=0.65 (medium, 35% reduction), HR=0.50 (large, 50% reduction).", "hazard_ratio", False),
             ("Sample Size Calculation", "Uses Schoenfeld's formula. Calculates number of participants needed based on expected event rate and hazard ratio. Higher event rates require fewer participants to achieve the same number of events.", "schoenfeld", False),
             ("Event Probability", "The probability of observing an event during follow-up affects sample size. Lower event rates require larger sample sizes to observe sufficient events for adequate power.", "schoenfeld", False)
